@@ -91,6 +91,7 @@ static const char* DOT11_PHY_TYPE_NAMES[] = {
 HANDLE OutFile = INVALID_HANDLE_VALUE;
 unsigned long long NumFramesConverted = 0;
 BOOLEAN Pass2 = FALSE;
+BOOLEAN created_iface = FALSE;
 char AuxFragBuf[MAX_PACKET_SIZE] = {0};
 unsigned long AuxFragBufOffset = 0;
 
@@ -99,6 +100,7 @@ BOOLEAN AddMetadata = FALSE;
 
 const GUID NdisCapId = { // Microsoft-Windows-NDIS-PacketCapture {2ED6006E-4729-4609-B423-3EE7BCD678EF}
     0x2ed6006e, 0x4729, 0x4609, 0xb4, 0x23, 0x3e, 0xe7, 0xbc, 0xd6, 0x78, 0xef};
+
 
 struct INTERFACE {
     struct INTERFACE* Next;
@@ -213,6 +215,9 @@ void WriteInterfaces()
         case PCAPNG_LINKTYPE_RAW:
             printf("IF: medium=mbb  ID=%u\tIfIndex=%u", Interface->PcapNgIfIndex, Interface->LowerIfIndex);
             break;
+        default:
+            printf("IF: medium=other  ID=%u\tIfIndex=%u", Interface->PcapNgIfIndex, Interface->LowerIfIndex);
+            break;
         }
         if (Interface->LowerIfIndex != Interface->MiniportIfIndex) {
             printf("\t(LWF over IfIndex %u)", Interface->MiniportIfIndex);
@@ -237,6 +242,121 @@ void WINAPI EventCallback(PEVENT_RECORD ev)
     PETHERNET_HEADER EthHdr;
     PIPV4_HEADER Ipv4Hdr;
     PIPV6_HEADER Ipv6Hdr;
+
+    #define MAX_SESSION_NAME_LEN 1024
+    const GUID VfpId = { // 9f2660ea-cfe7-428f-9850-aeca612619b0
+        0x9f2660ea, 0xcfe7, 0x428f, 0x98, 0x50, 0xae, 0xca, 0x61, 0x26, 0x19, 0xb0};
+
+    /*
+     *	A double linked list for buffered
+     *	ETW Events for current session
+     */
+    typedef struct _pcap_etw_list_event_t
+    {
+        struct _pcap_etw_list_event_t* next;
+        struct _pcap_etw_list_event_t* previous;
+        PEVENT_HEADER	event;
+    } pcap_etw_list_event_t;
+
+    /*
+     *	A list Type thread safe
+     */
+    typedef struct _pcap_etw_list_t
+    {
+        pcap_etw_list_event_t head;
+        pcap_etw_list_event_t tail;
+        HANDLE mutex;
+        HANDLE wait;
+    } pcap_etw_list_t;
+
+    /*
+     *	A context for ETW capture
+     */
+    typedef struct _pcap_etw_t
+    {
+        TRACEHANDLE	trace;
+        HANDLE		thread;
+        pcap_etw_list_t events;
+        char	session_name[MAX_SESSION_NAME_LEN];
+    } pcap_etw_t;
+
+    if (!Pass2 && !created_iface) {
+        AddInterface(99, 99, 147);
+        created_iface = TRUE;
+    }
+
+    if (Pass2 && NumFramesConverted > 100) {
+        return;
+    }
+
+    if (Pass2) {
+        if (IsEqualGUID(&ev->EventHeader.ProviderId, &VfpId)) {
+            pcap_etw_t* etw = (pcap_etw_t*)ev->UserContext;
+            pcap_etw_list_event_t* element = (pcap_etw_list_event_t*)malloc(sizeof(pcap_etw_list_event_t));
+
+            if (NULL == element) {
+                return;
+            }
+
+            ZeroMemory(element, sizeof(pcap_etw_list_event_t));
+
+            UINT32 extended_data_size = 0;
+            for (USHORT i = 0; i < ev->ExtendedDataCount; i++) {
+                extended_data_size += sizeof(USHORT) + sizeof(USHORT) + ev->ExtendedData[i].DataSize;
+            }
+
+            UCHAR* extended_data = (UCHAR*)malloc(extended_data_size);
+
+            if (extended_data == NULL) {
+                return;
+            }
+
+            size_t offset = 0;
+            printf("Extended data %u\n", ev->ExtendedDataCount);
+            for (USHORT i = 0; i < ev->ExtendedDataCount; i++) {
+
+                EVENT_HEADER_EXTENDED_DATA_ITEM data = ev->ExtendedData[i];
+                memcpy(extended_data + offset, &data.ExtType, sizeof(USHORT));
+                offset += sizeof(USHORT);
+                memcpy(extended_data + offset, &data.DataSize, sizeof(USHORT));
+                offset += sizeof(USHORT);
+                memcpy(extended_data + offset, (UCHAR*)data.DataPtr, data.DataSize);
+                offset += data.DataSize;
+            }
+
+            ev->EventHeader.Size = (USHORT)(sizeof(EVENT_HEADER) + sizeof(USHORT) + extended_data_size + ev->UserDataLength);
+            element->event = malloc(ev->EventHeader.Size);
+
+            if (NULL == element->event) {
+                return;
+            }
+
+            ZeroMemory(element->event, ev->EventHeader.Size);
+
+            memcpy(element->event, &ev->EventHeader, sizeof(EVENT_HEADER));
+            memcpy((unsigned char*)element->event + sizeof(EVENT_HEADER), &extended_data_size, sizeof(USHORT));
+            memcpy((unsigned char*)element->event + sizeof(EVENT_HEADER) + sizeof(USHORT), extended_data, extended_data_size);
+            memcpy((unsigned char*)element->event + sizeof(EVENT_HEADER) + sizeof(USHORT) + extended_data_size, ev->UserData, ev->UserDataLength);
+            element->event->P
+
+            unsigned char* buffer = (char*)malloc(sizeof(EVENT_RECORD));
+            memcpy(buffer, (const unsigned char*)&ev, sizeof(EVENT_RECORD));
+            TimeStamp.QuadPart = (ev->EventHeader.TimeStamp.QuadPart / 10) - 11644473600000000ll;
+            PcapNgWriteEnhancedPacket(
+                OutFile,
+                (unsigned char*) element->event,
+                element->event->Size,
+                element->event->Size,
+                GetInterface(99)->PcapNgIfIndex, // Iface->PcapNgIfIndex,
+                !!(ev->EventHeader.EventDescriptor.Keyword & KW_SEND),
+                TimeStamp.HighPart,
+                TimeStamp.LowPart,
+                NULL,
+                0);
+            NumFramesConverted++;
+            return;
+        }
+    }
 
     if (!IsEqualGUID(&ev->EventHeader.ProviderId, &NdisCapId) ||
         (ev->EventHeader.EventDescriptor.Id != tidPacketFragment &&
