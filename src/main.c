@@ -91,7 +91,6 @@ static const char* DOT11_PHY_TYPE_NAMES[] = {
 HANDLE OutFile = INVALID_HANDLE_VALUE;
 unsigned long long NumFramesConverted = 0;
 BOOLEAN Pass2 = FALSE;
-BOOLEAN created_iface = FALSE;
 char AuxFragBuf[MAX_PACKET_SIZE] = {0};
 unsigned long AuxFragBufOffset = 0;
 
@@ -280,88 +279,74 @@ void WINAPI EventCallback(PEVENT_RECORD ev)
         char	session_name[MAX_SESSION_NAME_LEN];
     } pcap_etw_t;
 
-    if (!Pass2 && !created_iface) {
-        AddInterface(99, 99, 147);
-        created_iface = TRUE;
-    }
-
-    if (Pass2 && NumFramesConverted > 100) {
-        return;
-    }
-
-    if (Pass2) {
-        if (IsEqualGUID(&ev->EventHeader.ProviderId, &VfpId)) {
-            pcap_etw_t* etw = (pcap_etw_t*)ev->UserContext;
-            pcap_etw_list_event_t* element = (pcap_etw_list_event_t*)malloc(sizeof(pcap_etw_list_event_t));
-
-            if (NULL == element) {
-                return;
-            }
-
-            ZeroMemory(element, sizeof(pcap_etw_list_event_t));
-
-            UINT32 extended_data_size = 0;
-            for (USHORT i = 0; i < ev->ExtendedDataCount; i++) {
-                extended_data_size += sizeof(USHORT) + sizeof(USHORT) + ev->ExtendedData[i].DataSize;
-            }
-
-            UCHAR* extended_data = (UCHAR*)malloc(extended_data_size);
-
-            if (extended_data == NULL) {
-                return;
-            }
-
-            size_t offset = 0;
-            printf("Extended data %u\n", ev->ExtendedDataCount);
-            for (USHORT i = 0; i < ev->ExtendedDataCount; i++) {
-
-                EVENT_HEADER_EXTENDED_DATA_ITEM data = ev->ExtendedData[i];
-                memcpy(extended_data + offset, &data.ExtType, sizeof(USHORT));
-                offset += sizeof(USHORT);
-                memcpy(extended_data + offset, &data.DataSize, sizeof(USHORT));
-                offset += sizeof(USHORT);
-                memcpy(extended_data + offset, (UCHAR*)data.DataPtr, data.DataSize);
-                offset += data.DataSize;
-            }
-
-            ev->EventHeader.Size = (USHORT)(sizeof(EVENT_HEADER) + sizeof(USHORT) + extended_data_size + ev->UserDataLength);
-            element->event = malloc(ev->EventHeader.Size);
-
-            if (NULL == element->event) {
-                return;
-            }
-
-            ZeroMemory(element->event, ev->EventHeader.Size);
-
-            memcpy(element->event, &ev->EventHeader, sizeof(EVENT_HEADER));
-            memcpy((unsigned char*)element->event + sizeof(EVENT_HEADER), &extended_data_size, sizeof(USHORT));
-            memcpy((unsigned char*)element->event + sizeof(EVENT_HEADER) + sizeof(USHORT), extended_data, extended_data_size);
-            memcpy((unsigned char*)element->event + sizeof(EVENT_HEADER) + sizeof(USHORT) + extended_data_size, ev->UserData, ev->UserDataLength);
-            element->event->P
-
-            unsigned char* buffer = (char*)malloc(sizeof(EVENT_RECORD));
-            memcpy(buffer, (const unsigned char*)&ev, sizeof(EVENT_RECORD));
-            TimeStamp.QuadPart = (ev->EventHeader.TimeStamp.QuadPart / 10) - 11644473600000000ll;
-            PcapNgWriteEnhancedPacket(
-                OutFile,
-                (unsigned char*) element->event,
-                element->event->Size,
-                element->event->Size,
-                GetInterface(99)->PcapNgIfIndex, // Iface->PcapNgIfIndex,
-                !!(ev->EventHeader.EventDescriptor.Keyword & KW_SEND),
-                TimeStamp.HighPart,
-                TimeStamp.LowPart,
-                NULL,
-                0);
-            NumFramesConverted++;
-            return;
-        }
-    }
+    // if (Pass2 && NumFramesConverted > 100) {
+    //    return;
+    //}
 
     if (!IsEqualGUID(&ev->EventHeader.ProviderId, &NdisCapId) ||
         (ev->EventHeader.EventDescriptor.Id != tidPacketFragment &&
          ev->EventHeader.EventDescriptor.Id != tidPacketMetadata &&
          ev->EventHeader.EventDescriptor.Id != tidVMSwitchPacketFragment)) {
+
+        if (!Pass2) {
+            return;
+        }
+
+        UINT32 extended_data_size = 0;
+        for (USHORT i = 0; i < ev->ExtendedDataCount; i++) {
+            extended_data_size += sizeof(USHORT) + sizeof(USHORT) + ev->ExtendedData[i].DataSize;
+        }
+
+        UCHAR* extended_data = (UCHAR*)malloc(extended_data_size);
+
+        if (extended_data == NULL) {
+            return;
+        }
+
+        size_t offset = 0;
+        for (USHORT i = 0; i < ev->ExtendedDataCount; i++) {
+
+            EVENT_HEADER_EXTENDED_DATA_ITEM data = ev->ExtendedData[i];
+            memcpy(extended_data + offset, &data.ExtType, sizeof(USHORT));
+            offset += sizeof(USHORT);
+            memcpy(extended_data + offset, &data.DataSize, sizeof(USHORT));
+            offset += sizeof(USHORT);
+            memcpy(extended_data + offset, (UCHAR*)data.DataPtr, data.DataSize);
+            offset += data.DataSize;
+        }
+        //                              EventHeader          +  ProcessorNumber + Alignment     + LoggerId       + extended_data_size + extended_data      + UserDataLength
+        ev->EventHeader.Size = (USHORT)(sizeof(EVENT_HEADER) + sizeof(UCHAR)    + sizeof(UCHAR) + sizeof(USHORT) + sizeof(USHORT)     + extended_data_size + ev->UserDataLength);
+
+        ZeroMemory(AuxFragBuf, ev->EventHeader.Size);
+        offset = 0;
+        memcpy(AuxFragBuf, &ev->EventHeader, sizeof(EVENT_HEADER));
+        offset += sizeof(EVENT_HEADER);
+        memcpy((unsigned char*)AuxFragBuf + offset, &ev->BufferContext.ProcessorNumber, sizeof(UCHAR));
+        offset += sizeof(UCHAR);
+        memcpy((unsigned char*)AuxFragBuf + offset, &ev->BufferContext.Alignment, sizeof(UCHAR));
+        offset += sizeof(UCHAR);
+        memcpy((unsigned char*)AuxFragBuf + offset, &ev->BufferContext.LoggerId, sizeof(USHORT));
+        offset += sizeof(USHORT);
+        memcpy((unsigned char*)AuxFragBuf + offset, &extended_data_size, sizeof(USHORT));
+        offset += sizeof(USHORT);
+        memcpy((unsigned char*)AuxFragBuf + offset, extended_data, extended_data_size);
+        offset += extended_data_size;
+        memcpy((unsigned char*)AuxFragBuf + offset, ev->UserData, ev->UserDataLength);
+
+
+        TimeStamp.QuadPart = (ev->EventHeader.TimeStamp.QuadPart / 10) - 11644473600000000ll;
+        PcapNgWriteEnhancedPacket(
+            OutFile,
+            AuxFragBuf,
+            ev->EventHeader.Size,
+            ev->EventHeader.Size,
+            GetInterface(99)->PcapNgIfIndex, // Iface->PcapNgIfIndex,
+            !!(ev->EventHeader.EventDescriptor.Keyword & KW_SEND),
+            TimeStamp.HighPart,
+            TimeStamp.LowPart,
+            NULL,
+            0);
+        NumFramesConverted++;
         return;
     }
 
@@ -624,6 +609,7 @@ int __cdecl wmain(int argc, wchar_t** argv)
     LogFile.EventRecordCallback = EventCallback;
     LogFile.Context = NULL;
 
+    AddInterface(99, 99, 147);
     TraceHandle = OpenTrace(&LogFile);
     if (TraceHandle == INVALID_PROCESSTRACE_HANDLE) {
         Err = GetLastError();
