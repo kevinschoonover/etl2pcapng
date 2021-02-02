@@ -279,9 +279,9 @@ void WINAPI EventCallback(PEVENT_RECORD ev)
         char	session_name[MAX_SESSION_NAME_LEN];
     } pcap_etw_t;
 
-    // if (Pass2 && NumFramesConverted > 100) {
-    //    return;
-    //}
+    if (Pass2 && NumFramesConverted > 100) {
+        return;
+    }
 
     if (!IsEqualGUID(&ev->EventHeader.ProviderId, &NdisCapId) ||
         (ev->EventHeader.EventDescriptor.Id != tidPacketFragment &&
@@ -315,9 +315,10 @@ void WINAPI EventCallback(PEVENT_RECORD ev)
             offset += data.DataSize;
         }
         //                              EventHeader          +  ProcessorNumber + Alignment     + LoggerId       + extended_data_size + extended_data      + UserDataLength
-        ev->EventHeader.Size = (USHORT)(sizeof(EVENT_HEADER) + sizeof(UCHAR)    + sizeof(UCHAR) + sizeof(USHORT) + sizeof(USHORT)     + extended_data_size + ev->UserDataLength);
+        USHORT size = (USHORT)(sizeof(EVENT_HEADER) + sizeof(UCHAR) + sizeof(UCHAR) + sizeof(USHORT) + sizeof(USHORT) + extended_data_size + ev->UserDataLength);
+       // ev->EventHeader.Size = (USHORT)(sizeof(EVENT_HEADER) + sizeof(UCHAR)    + sizeof(UCHAR) + sizeof(USHORT) + sizeof(USHORT)     + extended_data_size + ev->UserDataLength);
 
-        ZeroMemory(AuxFragBuf, ev->EventHeader.Size);
+        ZeroMemory(AuxFragBuf, size);
         offset = 0;
         memcpy(AuxFragBuf, &ev->EventHeader, sizeof(EVENT_HEADER));
         offset += sizeof(EVENT_HEADER);
@@ -338,8 +339,8 @@ void WINAPI EventCallback(PEVENT_RECORD ev)
         PcapNgWriteEnhancedPacket(
             OutFile,
             AuxFragBuf,
-            ev->EventHeader.Size,
-            ev->EventHeader.Size,
+            size,
+            size,
             GetInterface(99)->PcapNgIfIndex, // Iface->PcapNgIfIndex,
             !!(ev->EventHeader.EventDescriptor.Keyword & KW_SEND),
             TimeStamp.HighPart,
